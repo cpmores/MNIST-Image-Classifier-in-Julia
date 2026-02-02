@@ -1,3 +1,6 @@
+using Pkg
+Pkg.activate(pwd())
+Pkg.instantiate()
 include("../src/classifier.jl")
 using .classifier
 
