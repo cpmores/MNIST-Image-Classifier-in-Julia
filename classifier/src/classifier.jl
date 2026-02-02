@@ -80,6 +80,9 @@ end
 
 saveFile = joinpath(pwd(), "save/cnn_model.jld2")
 function save(mod::Mod)
+    if !isdir(dirname(saveFile))
+        mkpath(saveFile)
+    end
     @save saveFile mod
     println("Successfully saved $(saveFile)")
 end
