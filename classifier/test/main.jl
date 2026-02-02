@@ -13,7 +13,9 @@ else
         MaxPoolLayer((2, 2)),
         Flatten(),
         DenseLayer(trainImages.rows * trainImages.cols * 32 ÷ 16, 4096),
+        ReLU(),
         DenseLayer(4096, 256),
+        ReLU(),
         DenseLayer(256, 10)
     ))
 end

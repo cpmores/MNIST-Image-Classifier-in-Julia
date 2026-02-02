@@ -19,106 +19,94 @@ end
 
 function backward(layer::ConvLayer, cache::LayerCache, grad_output)
     # 1. get last layer's input delta
+    
     # 1) shape a new output delta with stribe 
     stribe = layer.stribe
-    grad_output_height = size(grad_output)[1]
-    grad_output_width = size(grad_output)[2]
-    kernel_height = size(layer.weights)[1]
-    kernel_width = size(layer.weights)[2]
-
-    num_output_channnels = size(cache.output)[3]
-    num_input_channels = size(cache.input)[3]
-
-    compute_output_height = grad_output_height + (grad_output_height - 1) * (stribe - 1)
-    compute_output_width = grad_output_width + (grad_output_width - 1) * (stribe - 1)
-    compute_output_height_padding = kernel_height - 1
-    compute_output_width_padding = kernel_width - 1
-    compute_output_delta = zeros(Float32, compute_output_height + 2 * compute_output_height_padding,
-        compute_output_width + 2 * compute_output_width_padding, num_output_channnels)
-
-    for noc in 1:num_output_channnels
-
-        for goh in 1:grad_output_height
-
-            for gow in 1:grad_output_width
-                num = grad_output[goh, gow, noc]
-                newHeight = (goh - 1) * stribe + 1 + compute_output_height_padding
-                newWidth = (gow - 1) * stribe + 1 + compute_output_width_padding
-                compute_output_delta[newHeight, newWidth, noc] = num
+    H_grad, W_grad, C_out = size(grad_output)
+    H_k, W_k, C_in, _ = size(layer.weights)
+    
+    # Compute expanded gradient dimensions
+    H_expand = H_grad + (H_grad - 1) * (stribe - 1)
+    W_expand = W_grad + (W_grad - 1) * (stribe - 1)
+    pad_h = H_k - 1
+    pad_w = W_k - 1
+    
+    # Initialize expanded gradient with zeros
+    grad_expanded = zeros(Float32, H_expand + 2pad_h, W_expand + 2pad_w, C_out)
+    
+    # Insert gradients at strided positions
+    @inbounds for oc in 1:C_out
+        for h in 1:H_grad
+            h_exp = (h - 1) * stribe + 1 + pad_h
+            for w in 1:W_grad
+                w_exp = (w - 1) * stribe + 1 + pad_w
+                grad_expanded[h_exp, w_exp, oc] = grad_output[h, w, oc]
             end
         end
     end
-
+    
     # 2) calculate input delta
-    grad_input_height = compute_output_height + compute_output_height_padding
-    grad_input_width = compute_output_width + compute_output_width_padding
-    grad_input = zeros(Float32, grad_input_height, grad_input_width, num_input_channels)
-    for noc in 1:num_output_channnels
-
-        computeDelta = @view compute_output_delta[:, :, noc]
-        for nic in 1:num_input_channels
-
-            kernel = @view layer.weights[:, :, nic, noc]
-            for gih in 1:grad_input_height
-
-                for giw in 1:grad_input_width
-
-                    nowComputeDelta = @view computeDelta[gih:gih+kernel_height-1, giw:giw+kernel_width-1]
-                    for h in 1:kernel_height
-
-                        for w in 1:kernel_width
-
-                            grad_input[gih, giw, nic] += kernel[turn_kernel_around(h, w, kernel_height, kernel_width)...] * nowComputeDelta[h, w]
-                        end
+    H_in_grad = H_expand + pad_h
+    W_in_grad = W_expand + pad_w
+    grad_input = zeros(Float32, H_in_grad, W_in_grad, C_in)
+    
+    @inbounds for oc in 1:C_out
+        grad_exp = @view grad_expanded[:, :, oc]
+        for ic in 1:C_in
+            kernel = @view layer.weights[:, :, ic, oc]
+            # Rotate kernel 180 degrees for convolution
+            for h in 1:H_in_grad
+                for w in 1:W_in_grad
+                    patch = @view grad_exp[h:h+H_k-1, w:w+W_k-1]
+                    acc = 0.0f0
+                    for kh in 1:H_k, kw in 1:W_k
+                        # Flip kernel indices
+                        k_rot_h = H_k - kh + 1
+                        k_rot_w = W_k - kw + 1
+                        acc += kernel[k_rot_h, k_rot_w] * patch[kh, kw]
                     end
+                    grad_input[h, w, ic] += acc
                 end
             end
         end
     end
-
+    
     # 2. get last layer's kernel delta
-    kernelDelta = zeros(Float32, kernel_height, kernel_width, num_input_channels, num_output_channnels)
+    kernelDelta = zeros(Float32, H_k, W_k, C_in, C_out)
+    
     # 3. get last layer's bias delta
-    biasDelta = zeros(Float32, num_output_channnels)
-    for noc in 1:num_output_channnels
-
-        computeDelta =
-            @view compute_output_delta[compute_output_height_padding+1:compute_output_height_padding+compute_output_height,
-                compute_output_width_padding+1:compute_output_width_padding+compute_output_width,
-                noc]
-        for coh in 1:compute_output_height
-
-            for cow in 1:compute_output_width
-
-                biasDelta[noc] += computeDelta[coh, cow]
-            end
+    biasDelta = zeros(Float32, C_out)
+    
+    # Extract valid region of expanded gradient (without padding)
+    grad_valid = @view grad_expanded[pad_h+1:pad_h+H_expand, pad_w+1:pad_w+W_expand, :]
+    
+    @inbounds for oc in 1:C_out
+        grad_slice = @view grad_valid[:, :, oc]
+        
+        # Compute bias gradient (sum of all gradient elements)
+        bias_acc = 0.0f0
+        for h in 1:H_expand, w in 1:W_expand
+            bias_acc += grad_slice[h, w]
         end
-
-        for nic in 1:num_input_channels
-
-            input = @view cache.input[:, :, nic]
-            for kh in 1:kernel_height
-
-                for kw in 1:kernel_width
-
-                    computeInput =
-                        @view input[kh:kh+compute_output_height-1,
-                            kw:kw+compute_output_width-1]
-
-                    for h in 1:compute_output_height
-
-                        for w in 1:compute_output_width
-
-                            kernelDelta[kh, kw, nic, noc] += computeInput[h, w] * computeDelta[h, w]
-                        end
-                    end
+        biasDelta[oc] = bias_acc
+        
+        # Compute weight gradients
+        for ic in 1:C_in
+            input_slice = @view cache.input[:, :, ic]
+            for kh in 1:H_k, kw in 1:W_k
+                # Extract input patch for this kernel position
+                input_patch = @view input_slice[kh:kh+H_expand-1, kw:kw+W_expand-1]
+                
+                acc = 0.0f0
+                for h in 1:H_expand, w in 1:W_expand
+                    acc += input_patch[h, w] * grad_slice[h, w]
                 end
+                kernelDelta[kh, kw, ic, oc] = acc
             end
         end
     end
-
+    
     return grad_input, (kernelDelta, biasDelta)
-
 end
 
 # for ReLU
@@ -249,14 +237,18 @@ function forward(layer::DenseLayer, x)
     num_output_channels = size(layer.weights)[1]
     num_input_channels = size(layer.weights)[2]
     output = zeros(Float32, num_output_channels)
+    
     for noc in 1:num_output_channels
-
+        # Initialize with bias and accumulate weighted inputs
         output[noc] = layer.bias[noc]
         weight_line = @view layer.weights[noc, :]
-        for nic in 1:num_input_channels
-
-            output[noc] += weight_line[nic] * x[nic]
+        
+        # Dot product between weight row and input
+        acc = 0.0f0
+        @simd for nic in 1:num_input_channels
+            acc += weight_line[nic] * x[nic]
         end
+        output[noc] += acc
     end
 
     cache = LayerCache(x, output, Dict())
@@ -267,27 +259,32 @@ function backward(layer::DenseLayer, cache::LayerCache, grad_output)
     num_output_channels = size(grad_output, 1)
     num_input_channels = length(cache.input)
     
+    # 1. Compute input gradient: W^T * grad_output
     grad_input = zeros(Float32, num_input_channels)
     
-    for nic in 1:num_input_channels
-
-        gradient = 0.0f0
-        for noc in 1:num_output_channels
-
-            gradient += layer.weights[noc, nic] * grad_output[noc]
-        end
-        grad_input[nic] = gradient
-    end
-    
-    grad_weights = zeros(Float32, num_output_channels, num_input_channels)
+    # Transposed matrix-vector multiplication
     for noc in 1:num_output_channels
+        grad_val = grad_output[noc]
+        weight_row = @view layer.weights[noc, :]
         
-        for nic in 1:num_input_channels
-
-            grad_weights[noc, nic] = grad_output[noc] * cache.input[nic]
+        # Accumulate contributions to each input neuron
+        @simd for nic in 1:num_input_channels
+            grad_input[nic] += weight_row[nic] * grad_val
         end
     end
     
+    # 2. Compute weight gradients: grad_output * input^T
+    grad_weights = zeros(Float32, num_output_channels, num_input_channels)
+    
+    # Outer product between grad_output and input
+    for noc in 1:num_output_channels
+        grad_val = grad_output[noc]
+        @simd for nic in 1:num_input_channels
+            grad_weights[noc, nic] = grad_val * cache.input[nic]
+        end
+    end
+    
+    # 3. Compute bias gradient (grad_output itself)
     grad_bias = copy(grad_output)
     return grad_input, (grad_weights, grad_bias)
 end

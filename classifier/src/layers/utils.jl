@@ -4,62 +4,42 @@ using ..LayerTypes
 export conv_forward, turn_kernel_around
 
 function conv_forward(input::Array{Float32,3}, weights::Array{Float32,4},
-    bias::Vector{Float32}, stribe::Int, padding::Int)
-
-    # 1. get size 
-    input_height, input_width, input_channels = size(input)
-    kernel_height, kernel_width, _, output_channels = size(weights)
-
-    # 2. calculate output size 
-    output_height = div(input_height + 2 * padding - kernel_height, stribe) + 1
-    output_width = div(input_width + 2 * padding - kernel_width, stribe) + 1
-
-    output = zeros(Float32, output_height, output_width, output_channels)
-
-    # 3. add padding
+                      bias::Vector{Float32}, stride::Int, padding::Int)
+    
+    H_in, W_in, C_in = size(input)
+    H_k, W_k, _, C_out = size(weights)
+    
+    H_out = div(H_in + 2 * padding - H_k, stride) + 1
+    W_out = div(W_in + 2 * padding - W_k, stride) + 1
+    
     if padding > 0
-        padded_input = zeros(Float32,
-            input_height + 2 * padding,
-            input_width + 2 * padding,
-            input_channels)
-        padded_input[padding+1:padding+input_height,
-            padding+1:padding+input_width, :] .= input
-        input = padded_input
-        input_height, input_width, _ = size(input)
+        padded = zeros(Float32, H_in + 2padding, W_in + 2padding, C_in)
+        padded[padding+1:padding+H_in, padding+1:padding+W_in, :] .= input
+        input = padded
+        H_in, W_in, _ = size(input)
     end
-
-    # 4. conv calculation
-    for out_ch in 1:output_channels
-        bias_val = bias[out_ch]
-
-        for in_ch in 1:input_channels
-            kernel = @view weights[:, :, in_ch, out_ch]
-
-            for out_h in 1:output_height
-                input_h = (out_h - 1) * stribe + 1
-
-                for out_w in 1:output_width
-                    input_w = (out_w - 1) * stribe + 1
-
-                    input_block = @view input[input_h:input_h+kernel_height-1,
-                        input_w:input_w+kernel_width-1,
-                        in_ch]
-
-                    conv_val = 0.0f0
-                    for kh in 1:kernel_height, kw in 1:kernel_width
-                        conv_val += input_block[kh, kw] * kernel[kh, kw]
-                    end
-
-                    if in_ch == 1
-                        output[out_h, out_w, out_ch] = bias_val + conv_val
-                    else
-                        output[out_h, out_w, out_ch] += conv_val
+    
+    output = zeros(Float32, H_out, W_out, C_out)
+    
+    @inbounds for oc in 1:C_out
+        b = bias[oc]
+        for h_out in 1:H_out
+            h_in = (h_out - 1) * stride + 1
+            for w_out in 1:W_out
+                w_in = (w_out - 1) * stride + 1
+                acc = 0.0f0
+                for ic in 1:C_in
+                    kernel = @view weights[:, :, ic, oc]
+                    patch = @view input[h_in:h_in+H_k-1, w_in:w_in+W_k-1, ic]
+                    for kh in 1:H_k, kw in 1:W_k
+                        acc += patch[kh, kw] * kernel[kh, kw]
                     end
                 end
+                output[h_out, w_out, oc] = b + acc
             end
         end
     end
-
+    
     return output
 end
 
