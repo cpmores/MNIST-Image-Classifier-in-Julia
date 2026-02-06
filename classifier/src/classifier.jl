@@ -17,9 +17,9 @@ using JLD2
 using Dates
 
 export ConvLayer, ReLU, MaxPoolLayer, Flatten, DenseLayer, SoftmaxWithCrossEntropyLoss
-export train, save, load, isSaved
+export train, save, load, isSaved, test
 export Mod, Chain
-export trainImages, trainLabels, testImages, testLabels
+export trainImages, trainLabels, testImages, testLabels, saveFile
 
 batches::Vector{DataBatch} = create_batches(trainImages, trainLabels)
 testBatches::Vector{DataBatch} = create_batches(testImages, testLabels)
@@ -30,13 +30,18 @@ function train(mod::Mod)
     
     start_time = time()
     
-    for (batchIndex, batch) in enumerate(batches)
+    @showprogress 1 "Training " for (batchIndex, batch) in enumerate(batches)
         batch_size = batch.batch_size
-        @showprogress 1 "Training $(batchIndex)" for i in 1:batch_size
-            image = batch.images[:, :, :, i]
-            label = batch.labels[i]
-            Model.forward(mod.chain, image, label)
-            Model.backward(mod.chain)
+        # @showprogress 1 "Training $(batchIndex)" for i in 1:batch_size
+        for i in 1:batch_size
+            imageTime = @elapsed begin
+                image = batch.images[:, :, :, i]
+                label = batch.labels[i]
+
+                forward_time = @elapsed Model.forward(mod.chain, image, label)
+                backward_time = @elapsed Model.backward(mod.chain)
+            end
+
         end
     end
     
